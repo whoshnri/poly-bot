@@ -1,6 +1,12 @@
+import type { ScheduleWakeOnceResult } from "../types/scheduler";
+import { compileTradingGraph } from "../ai";
+
+/**
+ * Schedules a one-shot wake cron task for a future datetime.
+ */
 export function scheduleWakeOnce(
-  wakeAt: Date,
-): { delayMs: number; cronExpression: string } {
+  wakeAt: Date, sessionId : string | null
+): ScheduleWakeOnceResult {
   const wakeEpoch = wakeAt.getTime();
 
   if (!Number.isFinite(wakeEpoch)) {
@@ -13,7 +19,7 @@ export function scheduleWakeOnce(
   if (delayMs <= 0) {
     throw new Error("Wake datetime must be in the future.");
   }
-
+ 
   const cronExpression = [
     wakeAt.getUTCMinutes(),
     wakeAt.getUTCHours(),
@@ -27,7 +33,10 @@ export function scheduleWakeOnce(
       return;
     }
 
-    console.log(`[wake] triggered at ${new Date().toISOString()}`);
+    // compile the graph
+    sessionId ? compileTradingGraph({sessionId : sessionId}) : compileTradingGraph()
+    console.log(`AI restart triggered at ${wakeAt.toLocaleDateString()}`)
+
     cronTask.stop();
   });
 

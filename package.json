@@ -15,11 +15,17 @@
     "tsx": "^4.21.0"
   },
   "dependencies": {
+    "@langchain/google-genai": "^0.1.8",
+    "@langchain/langgraph": "^1.2.8",
+    "@polymarket/clob-client": "^5.8.1",
+    "@polymarket/clob-client-v2": "^1.0.0",
     "@prisma/adapter-pg": "^7.7.0",
     "@prisma/client": "^7.7.0",
     "dotenv": "^17.4.2",
+    "ethers": "^6.16.0",
     "hono": "^4.12.12",
-    "pg": "^8.20.0"
+    "pg": "^8.20.0",
+    "zod": "^4.3.6"
   },
   "peerDependencies": {
     "typescript": "^6.0.2"

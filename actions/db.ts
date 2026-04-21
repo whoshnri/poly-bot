@@ -1,22 +1,11 @@
 import prisma from "../lib/prisma";
 import { callWakeApi } from "../lib/wakeCaller";
-import { TaskAction, type Prisma } from "../src/generated/prisma/client";
+import { SessionAction } from "../src/generated/prisma/client";
+import type { CreateNewStageInput, CreateNewTaskInput } from "../types/db";
 
-type CreateNewTaskInput = {
-  name: string;
-  pages?: Prisma.InputJsonValue;
-  metadata?: Prisma.InputJsonValue;
-};
-
-type CreateNewStageInput = {
-  summary: string;
-  todo: string;
-  taskAction: TaskAction;
-  nextWake: Date | string;
-  sequence?: number;
-  prevStageId?: string | null;
-};
-
+/**
+ * Creates a new session task.
+ */
 export async function createNewTask(input: CreateNewTaskInput) {
   return prisma.session.create({
     data: {
@@ -27,8 +16,11 @@ export async function createNewTask(input: CreateNewTaskInput) {
   });
 }
 
-export async function createNewStage(taskId: string, input: CreateNewStageInput) {
-  const latestStage = await getLatestStage(taskId);
+/**
+ * Creates the next stage for a session and schedules its wake call.
+ */
+export async function createNewStage(sessionId: string, input: CreateNewStageInput) {
+  const latestStage = await getLatestStage(sessionId);
   const nextWake = input.nextWake instanceof Date ? input.nextWake : new Date(input.nextWake);
 
   if (!Number.isFinite(nextWake.getTime())) {
@@ -37,21 +29,42 @@ export async function createNewStage(taskId: string, input: CreateNewStageInput)
 
   const createdStage = await prisma.sessionStage.create({
     data: {
-      sessionId: taskId,
+      sessionId,
       sequence: input.sequence ?? (latestStage?.sequence ?? 0) + 1,
       summary: input.summary,
       todo: input.todo,
-      taskAction: input.taskAction,
+      sessionAction: input.sessionAction,
+      stageActionCompleted: input.stageActionCompleted ?? false,
       nextWake,
       prevStageId: input.prevStageId ?? latestStage?.id ?? null,
     },
   });
 
-  await callWakeApi(createdStage.nextWake);
+  if (input.scheduleWake ?? true) {
+    await callWakeApi(createdStage.nextWake, sessionId );
+  }
 
   return createdStage;
 }
 
+export async function markLatestStageActionCompleted(
+  sessionId: string,
+  completed: boolean,
+) {
+  const latestStage = await getLatestStage(sessionId);
+  if (!latestStage) {
+    throw new Error(`No stage found for session: ${sessionId}`);
+  }
+
+  return prisma.sessionStage.update({
+    where: { id: latestStage.id },
+    data: { stageActionCompleted: completed },
+  });
+}
+
+/**
+ * Returns all session stages in ascending sequence order.
+ */
 export async function getAllStages(taskId: string) {
   return prisma.sessionStage.findMany({
     where: { sessionId: taskId },
@@ -59,11 +72,14 @@ export async function getAllStages(taskId: string) {
   });
 }
 
-export async function getLatestStage(taskId: string) {
+/**
+ * Returns the latest session stage by sequence.
+ */
+export async function getLatestStage(sessionId: string) {
   return prisma.sessionStage.findFirst({
-    where: { sessionId: taskId },
+    where: { sessionId },
     orderBy: { sequence: "desc" },
   });
 }
 
-export { TaskAction };
+export { SessionAction };

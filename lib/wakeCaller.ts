@@ -1,6 +1,9 @@
 const WAKE_SERVER_URL = process.env.WAKE_SERVER_URL ?? "http://localhost:3000";
 
-export async function callWakeApi(datetime: Date | string) {
+/**
+ * Calls the wake scheduler API with a target datetime.
+ */
+export async function callWakeApi(datetime: Date | string, sessionId : string) {
   const wakeAt = datetime instanceof Date ? datetime : new Date(datetime);
 
   if (!Number.isFinite(wakeAt.getTime())) {
@@ -14,6 +17,7 @@ export async function callWakeApi(datetime: Date | string) {
     },
     body: JSON.stringify({
       datetime: wakeAt.toISOString(),
+      sessionId : sessionId
     }),
   });
 
