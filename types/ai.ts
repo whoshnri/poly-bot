@@ -9,11 +9,13 @@ export type AiGraphMessage = {
 
 export type CompileTradingGraphParams = {
   sessionId?: string;
+  forceInitPath?: boolean;
 };
 
 export type TradingGraphNodeState = {
   sessionId: string | null;
   wakeTraceId: string | null;
+  forceInitPath: boolean;
   prompt: string;
   messages: AiGraphMessage[];
   aiResponse: AiModelResponse | null;

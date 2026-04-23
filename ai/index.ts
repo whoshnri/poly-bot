@@ -10,6 +10,7 @@ import {
   SessionAction,
 } from "../actions/db";
 import { aiModelResponseSchema } from "../lib/aiSchemas";
+import { botConfig } from "../lib/config";
 import {
   acquireStageLock,
   clearSessionOrderId,
@@ -17,6 +18,7 @@ import {
   releaseStageLock,
   setSessionOrderId,
 } from "../lib/helpers";
+import { startHeartbeat, stopHeartbeat } from "../lib/heartbeat";
 import { buildInitializationPrompt, buildWakePrompt } from "../lib/prompts";
 import { executeTool } from "../lib/tools";
 import type {
@@ -38,6 +40,10 @@ const tradingGraphState = Annotation.Root({
   wakeTraceId: Annotation<string | null>({
     reducer: (_left, right) => right,
     default: () => null,
+  }),
+  forceInitPath: Annotation<boolean>({
+    reducer: (_left, right) => right,
+    default: () => false,
   }),
   prompt: Annotation<string>({
     reducer: (_left, right) => right,
@@ -168,6 +174,15 @@ function formatConversation(messages: AiGraphMessage[]): string {
  * Creates strict model instructions for tool reasoning and stop-condition behavior.
  */
 function buildModelInstruction(): string {
+  const g = botConfig.tradeGuardrails;
+  const guardrailLine = [
+    `Guardrails: maxOrderSize=$${g.maxOrderSizeUsdc}USDC,`,
+    `maxExposure=$${g.maxExposureUsdc}USDC,`,
+    `price=${g.minPrice}-${g.maxPrice},`,
+    `sides=${g.allowedSides.join("/")},`,
+    `dryRun=${g.dryRun}.`,
+  ].join(" ");
+
   return [
     "You are the autonomous trading reasoner.",
     "Return only JSON that matches the provided schema.",
@@ -176,8 +191,9 @@ function buildModelInstruction(): string {
     "Stop condition: reasoning loop ends only when nextStage.stageAction is non-null.",
     "If more information is needed, keep nextStage.stageAction as null and use toolCalls.",
     "If START_TRADE reports an existing open order, validate it against intended shape before cancelling or retrying.",
-    "If you need to send a message to the owner of the bot in order to get useful information or call their attention to an issue you are fecing, then use the nextStage.stageAction clarify option and include the message breakdown in html",
+    "If you need to send a message to the owner of the bot in order to get useful information or call their attention to an issue you are facing, then use the nextStage.stageAction clarify option and include the message breakdown in html.",
     "When using save-target-token or update-target-token, include token metadata that should be persisted.",
+    guardrailLine,
   ].join(" ");
 }
 
@@ -464,6 +480,18 @@ function validateStartTradeOrder(order: StartTradeOrder): StartTradeOrder {
     throw new Error("START_TRADE order.size must be a positive finite number.");
   }
 
+  const g = botConfig.tradeGuardrails;
+
+  if (!g.allowedSides.includes(order.side)) {
+    throw new Error(`START_TRADE order.side "${order.side}" is not in allowedSides: ${g.allowedSides.join(", ")}.`);
+  }
+  if (order.size > g.maxOrderSizeUsdc) {
+    throw new Error(`START_TRADE order.size ${order.size} exceeds maxOrderSizeUsdc ${g.maxOrderSizeUsdc}.`);
+  }
+  if (order.price < g.minPrice || order.price > g.maxPrice) {
+    throw new Error(`START_TRADE order.price ${order.price} is outside allowed range [${g.minPrice}, ${g.maxPrice}].`);
+  }
+
   return order;
 }
 
@@ -534,6 +562,28 @@ async function runStageActionNode(state: TradingGraphNodeState) {
           };
         }
 
+        if (botConfig.tradeGuardrails.dryRun) {
+          await markLatestStageActionCompleted(sessionId, true);
+          return {
+            stageActionComplete: true,
+            intendedStartTradeOrder: intendedOrder,
+            stopReason: "Stage action completed: START_TRADE (dry-run)",
+            messages: [
+              createServerMessage(
+                JSON.stringify({
+                  kind: "stage-action-result",
+                  stageAction,
+                  status: "dry-run",
+                  reason: actionData.reason,
+                  resumeAt: actionData.resumeAt,
+                  order: intendedOrder,
+                  orderId: null,
+                }),
+              ),
+            ],
+          };
+        }
+
         const client = await initPolymarketClient();
         const side = intendedOrder.side === "BUY" ? Side.BUY : Side.SELL;
         const orderResult = await client.createAndPostOrder({
@@ -561,6 +611,7 @@ async function runStageActionNode(state: TradingGraphNodeState) {
         }
 
         await markLatestStageActionCompleted(sessionId, true);
+        startHeartbeat(sessionId);
         return {
           stageActionComplete: true,
           intendedStartTradeOrder: intendedOrder,
@@ -599,6 +650,7 @@ async function runStageActionNode(state: TradingGraphNodeState) {
 
         await clearSessionOrderId(sessionId);
         await markLatestStageActionCompleted(sessionId, true);
+        stopHeartbeat(sessionId);
 
         return {
           stageActionComplete: true,
@@ -720,10 +772,13 @@ async function runStageActionNode(state: TradingGraphNodeState) {
 }
 
 /**
- * Routes the first edge based on whether the compiler received a sessionId.
+ * Routes the first edge based on whether the compiler received a sessionId and forceInitPath flag.
  */
 function routeInitialPromptNode(state: TradingGraphNodeState) {
-  return state.sessionId ? "load-wake-prompt" : "load-init-prompt";
+  if (state.sessionId && !state.forceInitPath) {
+    return "load-wake-prompt";
+  }
+  return "load-init-prompt";
 }
 
 /**
@@ -783,6 +838,7 @@ export function compileTradingGraph(params: CompileTradingGraphParams = {}) {
       graph.invoke({
         sessionId: params.sessionId ?? null,
         wakeTraceId: randomUUID(),
+        forceInitPath: params.forceInitPath ?? false,
       }),
   };
 }

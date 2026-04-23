@@ -1,5 +1,6 @@
 import { buildSessionStageHistory } from "./helpers";
 import { buildToolsListDefinition } from "./tools";
+import { buildGuardrailsDescription } from "./config";
 
 /**
  * Builds the initial system prompt for a new autonomous trading session.
@@ -15,6 +16,8 @@ export function buildInitializationPrompt(): string {
     "- Strategy-aligned constraints from the operator that you must always follow.",
     "",
     "Operate with clear reasoning, stable stage transitions, and explicit next actions.",
+    "",
+    buildGuardrailsDescription(),
     "",
     buildToolsListDefinition(),
   ].join("\n");
@@ -37,6 +40,8 @@ export async function buildWakePrompt(sessionId: string): Promise<string> {
     "2. Use its 'Next TODO' as the last brainstormed todo to execute now.",
     "3. Use its previous session action as context for what to do next.",
     "4. Produce the next action and updated stage output clearly.",
+    "",
+    buildGuardrailsDescription(),
     "",
     buildToolsListDefinition(),
   ].join("\n");

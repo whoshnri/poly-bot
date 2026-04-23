@@ -33,9 +33,20 @@ export function scheduleWakeOnce(
       return;
     }
 
-    // compile the graph
-    sessionId ? compileTradingGraph({sessionId : sessionId}) : compileTradingGraph()
-    console.log(`AI restart triggered at ${wakeAt.toLocaleDateString()}`)
+    const { invoke } = sessionId
+      ? compileTradingGraph({ sessionId })
+      : compileTradingGraph();
+
+    invoke()
+      .then(() => {
+        console.log(`[wake] Graph execution completed for session=${sessionId ?? "new"} at ${wakeAt.toISOString()}`);
+      })
+      .catch((err: unknown) => {
+        console.error(
+          `[wake] Graph execution failed for session=${sessionId ?? "new"} at ${wakeAt.toISOString()}:`,
+          err instanceof Error ? err.message : err,
+        );
+      });
 
     cronTask.stop();
   });
