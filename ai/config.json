@@ -1,0 +1,11 @@
+{
+  "maxRetriesPerStage": 3,
+  "tradeGuardrails": {
+    "maxOrderSizeUsdc": 100,
+    "maxExposureUsdc": 500,
+    "allowedSides": ["BUY", "SELL"],
+    "minPrice": 0.01,
+    "maxPrice": 0.99,
+    "dryRun": false
+  }
+}
