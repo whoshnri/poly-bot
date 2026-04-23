@@ -1,5 +1,4 @@
-import { readFileSync } from "node:fs";
-import { join } from "node:path";
+import configJson from "../ai/config.json" with { type: "json" };
 
 export type TradeGuardrails = {
   maxOrderSizeUsdc: number;
@@ -15,8 +14,6 @@ export type BotConfig = {
   tradeGuardrails: TradeGuardrails;
 };
 
-const CONFIG_PATH = join(import.meta.dir, "../ai/config.json");
-
 const defaults: BotConfig = {
   maxRetriesPerStage: 3,
   tradeGuardrails: {
@@ -30,20 +27,14 @@ const defaults: BotConfig = {
 };
 
 function loadConfig(): BotConfig {
-  try {
-    const raw = readFileSync(CONFIG_PATH, "utf-8");
-    const parsed = JSON.parse(raw) as Partial<BotConfig>;
-    return {
-      maxRetriesPerStage: parsed.maxRetriesPerStage ?? defaults.maxRetriesPerStage,
-      tradeGuardrails: {
-        ...defaults.tradeGuardrails,
-        ...parsed.tradeGuardrails,
-      },
-    };
-  } catch {
-    console.warn("[config] Failed to load ai/config.json, using defaults.");
-    return defaults;
-  }
+  const parsed = configJson as Partial<BotConfig>;
+  return {
+    maxRetriesPerStage: parsed.maxRetriesPerStage ?? defaults.maxRetriesPerStage,
+    tradeGuardrails: {
+      ...defaults.tradeGuardrails,
+      ...parsed.tradeGuardrails,
+    },
+  };
 }
 
 export const botConfig: BotConfig = loadConfig();

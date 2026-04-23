@@ -564,7 +564,6 @@ async function runStageActionNode(state: TradingGraphNodeState) {
 
         if (botConfig.tradeGuardrails.dryRun) {
           await markLatestStageActionCompleted(sessionId, true);
-          startHeartbeat(sessionId);
           return {
             stageActionComplete: true,
             intendedStartTradeOrder: intendedOrder,
