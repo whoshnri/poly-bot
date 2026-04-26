@@ -1,4 +1,7 @@
 import { saveTargetToken, updateTargetToken } from "../actions/session";
+// --> changes start here
+import { readNewsArticle, searchNews } from "../news-endpoint";
+// --> changes end here
 import {
   cancelUnwantedOrder,
   getMarketById,
@@ -25,6 +28,21 @@ export const tools: Record<ToolSlug, string> = {
   "save-target-token": "Persist a new target token for the working session.",
   "update-target-token": "Update the target token for the working session.",
   "cancel-unwanted-order": "Cancel one open order by order ID after existence validation.",
+  // --> changes start here
+  "search-news":
+    "Search for recent news via Jina Search (s.jina.ai). " +
+    "Use ONLY when the sentimental market you are analysing involves real-world events " +
+    "(e.g. wars, elections, government decisions) and you need current news context. " +
+    "Provide a focused query and the desired language (hl). pageSize defaults to 5 — " +
+    "use the minimum needed. Results include title, url, description, and date; " +
+    "article bodies are omitted to save tokens. Follow up with read-news-article for full text.",
+  "read-news-article":
+    "Fetch full Markdown article content via Jina Reader (r.jina.ai). " +
+    "Only call this for specific URLs returned by search-news — do not fabricate URLs. " +
+    "Read at most 1-2 articles per reasoning cycle to stay within rate limits. " +
+    "The response includes the article body and an extracted links[] array " +
+    "you can use for deeper context if needed.",
+  // --> changes end here
 };
 
 /**
@@ -116,6 +134,22 @@ export async function executeTool(
         );
         return toToolResponse(`Cancelled order ${result.orderId}.`, result) as ToolResultMap[ToolSlug];
       }
+      // --> changes start here
+      case "search-news": {
+        const result = await searchNews(config as ToolConfigMap["search-news"]);
+        return toToolResponse(
+          `Fetched ${result.results.length} news result(s).`,
+          result,
+        ) as ToolResultMap[ToolSlug];
+      }
+      case "read-news-article": {
+        const result = await readNewsArticle(config as ToolConfigMap["read-news-article"]);
+        return toToolResponse(
+          `Fetched article: "${result.title ?? result.url}" (${result.links.length} link(s) extracted).`,
+          result,
+        ) as ToolResultMap[ToolSlug];
+      }
+      // --> changes end here
       default: {
         const unsupportedTool = toolSlug satisfies never;
         throw new Error(`Unsupported tool slug: ${unsupportedTool}`);

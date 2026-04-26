@@ -28,4 +28,8 @@ export type TradingGraphNodeState = {
   toolResults: ToolResponse<unknown>[];
   stageActionComplete: boolean;
   stopReason: string | null;
+  // --> changes start here
+  /** Counts how many tool-call rounds have completed in this wake cycle. Used to break infinite loops. */
+  toolCallIteration: number;
+  // --> changes end here
 };

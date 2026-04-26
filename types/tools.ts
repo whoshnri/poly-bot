@@ -7,6 +7,66 @@ import type {
   MarketPriceResponse,
 } from "./polymarket";
 
+// --> changes start here
+// ─── News / Jina types ────────────────────────────────────────────────────────
+
+/**
+ * Parameters the model provides when calling search-news.
+ * The API key is never included here — it is read from JINA_API_KEY env var only.
+ */
+export type SearchNewsParams = {
+  /** Focused search query, e.g. "Ukraine war ceasefire negotiations 2025". */
+  query: string;
+  /** BCP-47 language code for result language. Defaults to "en". */
+  hl?: string;
+  /**
+   * Number of results to return (1-10, default 5).
+   * Use the smallest number that gives enough signal to reason about the market.
+   */
+  pageSize?: number;
+};
+
+/** One news result entry as returned by s.jina.ai (content body omitted via X-Respond-With). */
+export type JinaSearchResult = {
+  title: string;
+  url: string;
+  description?: string;
+  date?: string;
+  source?: string;
+  favicon?: string;
+};
+
+/** Structured response from search-news. */
+export type SearchNewsResponse = {
+  results: JinaSearchResult[];
+};
+
+/**
+ * Parameters the model provides when calling read-news-article.
+ * Always use URLs returned by search-news — do not fabricate URLs.
+ */
+export type ReadNewsArticleParams = {
+  /** Full http/https URL of the article to read. Must come from search-news results. */
+  url: string;
+};
+
+/** One extracted hyperlink from an article — useful for recursive deep-dives. */
+export type NewsArticleLink = {
+  text: string;
+  url: string;
+};
+
+/** Full article content as returned by r.jina.ai. */
+export type NewsArticleContent = {
+  title?: string;
+  url: string;
+  /** Full article text in Markdown. Summarise key points; do not dump the whole thing. */
+  content: string;
+  /** Hyperlinks extracted from the article. Use sparingly for deeper context only. */
+  links: NewsArticleLink[];
+};
+// --> changes end here
+
 export type TargetTokenPayload = {
   tokenId: string;
   marketId?: string;
@@ -60,7 +120,11 @@ export type ToolSlug =
   | "get-open-orders"
   | "save-target-token"
   | "update-target-token"
-  | "cancel-unwanted-order";
+  | "cancel-unwanted-order"
+  // --> changes start here
+  | "search-news"
+  | "read-news-article";
+  // --> changes end here
 
 export type ToolConfigMap = {
   "get-markets": GetMarketsParams;
@@ -70,6 +134,10 @@ export type ToolConfigMap = {
   "save-target-token": SaveTargetTokenParams;
   "update-target-token": UpdateTargetTokenParams;
   "cancel-unwanted-order": CancelUnwantedOrderParams;
+  // --> changes start here
+  "search-news": SearchNewsParams;
+  "read-news-article": ReadNewsArticleParams;
+  // --> changes end here
 };
 
 export type ToolSuccessResponse<TData> = {
@@ -98,6 +166,10 @@ export type ToolResultMap = {
   "save-target-token": ToolResponse<TargetTokenPayload>;
   "update-target-token": ToolResponse<TargetTokenPayload>;
   "cancel-unwanted-order": ToolResponse<CancelUnwantedOrderResult>;
+  // --> changes start here
+  "search-news": ToolResponse<SearchNewsResponse>;
+  "read-news-article": ToolResponse<NewsArticleContent>;
+  // --> changes end here
 };
 
 export type ToolExecutorConfig = ToolConfigMap[ToolSlug];

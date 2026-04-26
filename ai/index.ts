@@ -73,6 +73,16 @@ const tradingGraphState = Annotation.Root({
     reducer: (_left, right) => right,
     default: () => null,
   }),
+  // --> changes start here
+  /**
+   * Tracks completed tool-call rounds in this wake cycle.
+   * Compared against botConfig.maxRetriesPerStage to break infinite reasoning loops.
+   */
+  toolCallIteration: Annotation<number>({
+    reducer: (_left, right) => right,
+    default: () => 0,
+  }),
+  // --> changes end here
 });
 
 /**
@@ -327,6 +337,10 @@ async function runToolCallsNode(state: TradingGraphNodeState) {
   return {
     toolResults: results,
     messages: serverMessages,
+    // --> changes start here
+    // Increment iteration counter so routeAfterModelNode can enforce the loop cap
+    toolCallIteration: state.toolCallIteration + 1,
+    // --> changes end here
   };
 }
 
@@ -788,6 +802,21 @@ function routeAfterModelNode(state: TradingGraphNodeState) {
   if (!state.aiResponse) {
     throw new Error("Model routing requires an AI response.");
   }
+
+  // --> changes start here
+  // Loop-break guard: if the model has been through maxRetriesPerStage tool-call rounds
+  // without committing to a stageAction, abort to prevent an infinite reasoning loop.
+  if (
+    state.toolCallIteration >= botConfig.maxRetriesPerStage &&
+    state.aiResponse.nextStage.stageAction === null
+  ) {
+    throw new Error(
+      `Tool-call loop limit reached: ${state.toolCallIteration} rounds completed ` +
+        `(maxRetriesPerStage=${botConfig.maxRetriesPerStage}). ` +
+        "Model must commit to a stageAction. Aborting wake cycle to prevent infinite loop.",
+    );
+  }
+  // --> changes end here
 
   if (state.aiResponse.toolCalls.length > 0) {
     return "run-tool-calls";

@@ -22,6 +22,10 @@ export const decisionToolSchema = z.enum([
   "cancel-unwanted-order",
   "save-target-token",
   "update-target-token",
+  // --> changes start here
+  "search-news",
+  "read-news-article",
+  // --> changes end here
 ]);
 
 const getMarketsToolMetadataSchema = z.object({
@@ -57,6 +61,35 @@ const tokenMutationToolMetadataSchema = z.object({
   marketId: z.string().min(1).optional(),
   note: z.string().min(1).optional(),
 });
+
+// --> changes start here
+/**
+ * search-news: model-supplied parameters for Jina Search (s.jina.ai).
+ * API key is NOT here — it lives in JINA_API_KEY env var only.
+ * Use only for sentimental markets where news context is required.
+ */
+const searchNewsToolMetadataSchema = z.object({
+  /** Focused search query, e.g. "Ukraine ceasefire talks April 2025". */
+  query: z.string().min(1),
+  /** BCP-47 language code. Defaults to "en". */
+  hl: z.string().min(2).max(10).optional(),
+  /**
+   * Number of results to return (1–10, default 5).
+   * Use the minimum needed — smaller values reduce context token usage.
+   */
+  pageSize: z.number().int().min(1).max(10).optional(),
+});
+
+/**
+ * read-news-article: model-supplied URL to fetch via Jina Reader (r.jina.ai).
+ * Only use URLs returned by search-news — do not fabricate URLs.
+ * Read at most 1-2 articles per reasoning cycle to stay within rate limits.
+ */
+const readNewsArticleToolMetadataSchema = z.object({
+  /** Full http/https article URL from a search-news result. */
+  url: z.string().url(),
+});
+// --> changes end here
 
 
 /**
@@ -98,6 +131,18 @@ export const toolCallSchema = z.discriminatedUnion("tool", [
     reason: z.string().min(1),
     metadata: tokenMutationToolMetadataSchema,
   }),
+  // --> changes start here
+  z.object({
+    tool: z.literal("search-news"),
+    reason: z.string().min(1),
+    metadata: searchNewsToolMetadataSchema,
+  }),
+  z.object({
+    tool: z.literal("read-news-article"),
+    reason: z.string().min(1),
+    metadata: readNewsArticleToolMetadataSchema,
+  }),
+  // --> changes end here
 ]);
 
 const startTradeActionDataSchema = z.object({
