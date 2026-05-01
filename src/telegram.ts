@@ -14,6 +14,51 @@ import { buildGuardrailsDescription } from "../lib/config";
  * 2) Optionally set TELEGRAM_WEBHOOK_SECRET, then pass the same secret to Telegram setWebhook.
  * 3) Expose POST /telegram/webhook publicly and register that URL with Telegram.
  * 4) Call POST /telegram/commands/sync once to publish the slash-command menu.
+ *
+ * ─── WHAT IS MISSING / HOW TO ADD IT ──────────────────────────────────────────
+ *
+ * 1. ENVIRONMENT VARIABLES (must be set before the server starts)
+ *    - TELEGRAM_BOT_TOKEN      — get from @BotFather on Telegram
+ *    - TELEGRAM_WEBHOOK_SECRET — optional but recommended; any random string
+ *    - GEMINI_API_KEY          — Google AI Studio API key for the agent graph
+ *    - DATABASE_URL            — PostgreSQL connection string (Prisma needs this)
+ *    - WAKE_API_TOKEN          — secret for /wake endpoint (can be any string)
+ *    Add all of these to a .env file at the project root (Bun auto-loads it).
+ *
+ * 2. REGISTER THE TELEGRAM WEBHOOK
+ *    After deploying, call Telegram's setWebhook API once:
+ *      curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+ *           -H "Content-Type: application/json" \
+ *           -d '{"url":"https://<your-domain>/telegram/webhook",
+ *                "secret_token":"<TELEGRAM_WEBHOOK_SECRET>"}'
+ *    Then sync bot commands (shows the /menu in Telegram clients):
+ *      curl -X POST https://<your-domain>/telegram/commands/sync
+ *
+ * 3. DATABASE MIGRATIONS
+ *    Run `bun run prisma migrate deploy` (or `bunx prisma migrate dev` in dev)
+ *    before first use.  The bot will fail on DB calls if migrations are missing.
+ *
+ * 4. RESUME FLOW (currently mocked)
+ *    mockResumeSession() logs the intent but does not replay the graph.
+ *    Replace it with a real compileTradingGraph({ sessionId, forceInitPath: false })
+ *    call once the graph supports mid-session resume.
+ *
+ * 5. USER AUTHENTICATION / ALLOWLIST
+ *    Anyone who finds the bot can currently call every command.
+ *    Add an allowlist check in dispatchCommand() using ctx.from?.id compared
+ *    against a TELEGRAM_ALLOWED_USER_IDS env var (comma-separated user IDs).
+ *
+ * 6. /settings COMMAND
+ *    Currently a stub.  Wire it up to a Prisma-backed user-preferences table
+ *    (or store prefs in the session metadata JSON) and let users toggle dryRun,
+ *    maxOrderSize, etc. at runtime.
+ *
+ * 7. PUSHING CHANGES
+ *    git add src/telegram.ts
+ *    git commit -m "feat(telegram): <description>"
+ *    git push origin <your-branch>
+ *    Then open a PR or deploy directly depending on your workflow.
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 type SessionSnapshot = {
   id: string;
@@ -38,6 +83,7 @@ const TELEGRAM_COMMANDS = [
   { command: "sessions", description: "List recent trade sessions." },
   { command: "current", description: "Show latest session status." },
   { command: "start", description: "Start a new trading session." },
+  { command: "run", description: "Run the agent graph on the latest session." },
   { command: "exit", description: "Exit current interaction." },
   { command: "settings", description: "Adjust your experience." },
   { command: "help", description: "Show all commands and quick actions." },
@@ -112,32 +158,90 @@ async function replyWithLog(ctx: GrammyContext, text: string, options?: ReplyOpt
 }
 
 /**
- * Starts the autonomous graph in the background for a newly created session.
+ * Starts the autonomous graph in the background.
+ * When chatId is provided, sends a Telegram message on completion or failure.
  */
-function startInitialGraphRun(sessionId: string): void {
+function startGraphRun(sessionId: string, chatId?: number, label = "Initial"): void {
+  console.log(
+    "[graph-run-start]",
+    JSON.stringify({ sessionId, chatId: chatId ?? null, label, startedAt: new Date().toISOString() }),
+  );
+
   const { invoke } = compileTradingGraph({ sessionId, forceInitPath: true });
+
   invoke()
     .then(() => {
-      console.log(`[session-start] Initial graph run completed for session=${sessionId}`);
+      console.log(
+        "[graph-run-done]",
+        JSON.stringify({ sessionId, label, completedAt: new Date().toISOString() }),
+      );
+      if (chatId) {
+        getBot()
+          .api.sendMessage(
+            chatId,
+            [
+              `✅ Agent graph run finished.`,
+              `Session: ${sessionId}`,
+              `Use /current to see the latest stage.`,
+            ].join("\n"),
+          )
+          .catch((err: unknown) => {
+            console.error(
+              "[graph-run-notify-error]",
+              JSON.stringify({
+                sessionId,
+                chatId,
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          });
+      }
     })
     .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
       console.error(
-        `[session-start] Initial graph run failed for session=${sessionId}:`,
-        err instanceof Error ? err.message : err,
+        "[graph-run-error]",
+        JSON.stringify({ sessionId, label, error: message, failedAt: new Date().toISOString() }),
       );
+      if (chatId) {
+        getBot()
+          .api.sendMessage(
+            chatId,
+            [
+              `❌ Agent graph run failed.`,
+              `Session: ${sessionId}`,
+              `Error: ${message}`,
+            ].join("\n"),
+          )
+          .catch((notifyErr: unknown) => {
+            console.error(
+              "[graph-run-notify-error]",
+              JSON.stringify({
+                sessionId,
+                chatId,
+                error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+              }),
+            );
+          });
+      }
     });
 }
 
 /**
  * Creates one persisted session and immediately kicks off its first AI run.
+ * chatId is optional; when supplied the user receives a Telegram message on completion.
  */
-async function createSession(): Promise<SessionSnapshot> {
+async function createSession(chatId?: number): Promise<SessionSnapshot> {
+  console.log("[session-create]", JSON.stringify({ chatId: chatId ?? null, at: new Date().toISOString() }));
+
   const session = await createNewTask({
     name: `Autonomous session ${new Date().toISOString()}`,
     metadata: { targetToken: null },
   });
 
-  startInitialGraphRun(session.id);
+  console.log("[session-created]", JSON.stringify({ sessionId: session.id, name: session.name }));
+
+  startGraphRun(session.id, chatId, "Initial");
   return { id: session.id, name: session.name, createdAt: session.createdAt };
 }
 
@@ -357,15 +461,70 @@ async function sendCommandDirectory(ctx: GrammyContext): Promise<void> {
 }
 
 async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName): Promise<void> {
+  const chatId = ctx.chat?.id ?? undefined;
+
+  console.log(
+    "[telegram-command]",
+    JSON.stringify({
+      command,
+      updateId: ctx.update.update_id,
+      chatId: chatId ?? null,
+      userId: ctx.from?.id ?? null,
+      username: ctx.from?.username ?? null,
+    }),
+  );
+
   switch (command) {
     case "start": {
-      const session = await createSession();
+      const session = await createSession(chatId);
       await replyWithLog(
         ctx,
         [
-          "Started a new trading session.",
+          "🚀 Started a new trading session.",
           `Session ID: ${session.id}`,
           `Name: ${session.name}`,
+          "",
+          "The agent graph is now running in the background.",
+          "You will receive a message here when it completes.",
+          "Use /current to check the latest stage at any time.",
+        ].join("\n"),
+      );
+      return;
+    }
+    case "run": {
+      const latestSession = await prisma.session.findFirst({
+        orderBy: { createdAt: "desc" },
+        select: { id: true, name: true },
+      });
+
+      if (!latestSession) {
+        await replyWithLog(
+          ctx,
+          "No sessions found. Use /start to create your first session.",
+        );
+        return;
+      }
+
+      console.log(
+        "[telegram-run]",
+        JSON.stringify({
+          sessionId: latestSession.id,
+          chatId: chatId ?? null,
+          triggeredAt: new Date().toISOString(),
+        }),
+      );
+
+      startGraphRun(latestSession.id, chatId, "Manual");
+      await replyWithLog(
+        ctx,
+        [
+          "▶️ Agent graph run triggered.",
+          `Session ID: ${latestSession.id}`,
+          `Session Name: ${latestSession.name}`,
+          "",
+          "The agent is running in the background.",
+          "You will receive a message here when it completes.",
+          "Use /current to check progress.",
         ].join("\n"),
       );
       return;
@@ -401,6 +560,8 @@ function getBot(): Bot {
   }
 
   const bot = new Bot(getTelegramToken());
+
+  console.log("[telegram-bot-init]", JSON.stringify({ initializedAt: new Date().toISOString() }));
 
   // Prevent full ctx dumps on unhandled errors; log only debug-relevant fields.
   bot.catch((err) => {
@@ -443,6 +604,7 @@ function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => dispatchCommand(ctx, "start"));
+  bot.command("run", async (ctx) => dispatchCommand(ctx, "run"));
   bot.command("current", async (ctx) => dispatchCommand(ctx, "current"));
   bot.command("sessions", async (ctx) => dispatchCommand(ctx, "sessions"));
   bot.command("config", async (ctx) => dispatchCommand(ctx, "config"));
@@ -502,7 +664,15 @@ export async function handleTelegramWebhook(c: Context) {
   //   return c.json({ error: "Unauthorized." }, 401);
   // }
 
-  console.log("context recieved")
+  console.log(
+    "[telegram-webhook]",
+    JSON.stringify({
+      method: c.req.method,
+      path: c.req.path,
+      hasSecret: Boolean(c.req.header("X-Telegram-Bot-Api-Secret-Token")),
+      receivedAt: new Date().toISOString(),
+    }),
+  );
   const callback = webhookCallback(getBot(), "std/http");
   return callback(c.req.raw);
 }
