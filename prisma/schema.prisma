@@ -19,6 +19,14 @@ enum SessionAction {
   SKIP
 }
 
+model UserConfig {
+  id          String   @id @default(uuid()) @db.Uuid
+  telegramId  String   @unique
+  preferences Json
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
 model Session {
   id        String         @id @default(uuid()) @db.Uuid
   name      String

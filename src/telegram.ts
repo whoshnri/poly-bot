@@ -9,11 +9,39 @@ import { buildGuardrailsDescription } from "../lib/config";
 /**
  * Telegram webhook module (grammY + Hono).
  *
- * Usage:
- * 1) Set TELEGRAM_BOT_TOKEN (required).
- * 2) Optionally set TELEGRAM_WEBHOOK_SECRET, then pass the same secret to Telegram setWebhook.
- * 3) Expose POST /telegram/webhook publicly and register that URL with Telegram.
- * 4) Call POST /telegram/commands/sync once to publish the slash-command menu.
+ * ─── QUICK START ──────────────────────────────────────────────────────────────
+ *
+ * 1. ENVIRONMENT VARIABLES — copy .env.example → .env and fill in every value.
+ *    Bun auto-loads .env, so no dotenv import is needed.
+ *
+ * 2. DATABASE MIGRATIONS — run once before first use:
+ *      bunx prisma migrate deploy        # production
+ *      bunx prisma migrate dev           # development (also regenerates client)
+ *
+ * 3. START THE SERVER:
+ *      bun run dev                       # watch mode
+ *      bun run start                     # production
+ *
+ * 4. REGISTER THE TELEGRAM WEBHOOK — run once after deployment:
+ *      curl -X POST "https://api.telegram.org/bot<TOKEN>/setWebhook" \
+ *           -H "Content-Type: application/json" \
+ *           -d '{"url":"https://<your-domain>/telegram/webhook",
+ *                "secret_token":"<TELEGRAM_WEBHOOK_SECRET>"}'
+ *
+ * 5. SYNC THE SLASH-COMMAND MENU — run once (or after every TELEGRAM_COMMANDS change):
+ *      curl -X POST https://<your-domain>/telegram/commands/sync
+ *
+ * ─── WHAT IS STILL MISSING ────────────────────────────────────────────────────
+ *
+ * A. USER AUTHENTICATION / ALLOWLIST
+ *    Anyone who finds the bot can call every command.
+ *    Add an allowlist check in dispatchCommand() using ctx.from?.id compared
+ *    against a TELEGRAM_ALLOWED_USER_IDS env var (comma-separated user IDs).
+ *
+ * B. /settings COMMAND
+ *    Currently a stub.  Wire it up to a Prisma-backed user-preferences table
+ *    (or use session metadata JSON) to let users toggle dryRun, maxOrderSize, etc.
+ * ──────────────────────────────────────────────────────────────────────────────
  */
 type SessionSnapshot = {
   id: string;
@@ -21,23 +49,12 @@ type SessionSnapshot = {
   createdAt: Date;
 };
 
-type SessionResumeTarget = {
-  id: string;
-  name: string;
-  createdAt: Date;
-  latestStage: {
-    sequence: number;
-    sessionAction: string;
-    stageActionCompleted: boolean;
-    summary: string;
-  } | null;
-};
-
 const TELEGRAM_COMMANDS = [
   { command: "config", description: "Set your trading preferences." },
   { command: "sessions", description: "List recent trade sessions." },
   { command: "current", description: "Show latest session status." },
   { command: "start", description: "Start a new trading session." },
+  { command: "run", description: "Run the agent graph on the latest session." },
   { command: "exit", description: "Exit current interaction." },
   { command: "settings", description: "Adjust your experience." },
   { command: "help", description: "Show all commands and quick actions." },
@@ -112,32 +129,90 @@ async function replyWithLog(ctx: GrammyContext, text: string, options?: ReplyOpt
 }
 
 /**
- * Starts the autonomous graph in the background for a newly created session.
+ * Starts the autonomous graph in the background.
+ * When chatId is provided, sends a Telegram message on completion or failure.
  */
-function startInitialGraphRun(sessionId: string): void {
+function startGraphRun(sessionId: string, chatId?: number, label = "Initial"): void {
+  console.log(
+    "[graph-run-start]",
+    JSON.stringify({ sessionId, chatId: chatId ?? null, label, startedAt: new Date().toISOString() }),
+  );
+
   const { invoke } = compileTradingGraph({ sessionId, forceInitPath: true });
+
   invoke()
     .then(() => {
-      console.log(`[session-start] Initial graph run completed for session=${sessionId}`);
+      console.log(
+        "[graph-run-done]",
+        JSON.stringify({ sessionId, label, completedAt: new Date().toISOString() }),
+      );
+      if (chatId) {
+        getBot()
+          .api.sendMessage(
+            chatId,
+            [
+              `✅ Agent graph run finished.`,
+              `Session: ${sessionId}`,
+              `Use /current to see the latest stage.`,
+            ].join("\n"),
+          )
+          .catch((err: unknown) => {
+            console.error(
+              "[graph-run-notify-error]",
+              JSON.stringify({
+                sessionId,
+                chatId,
+                error: err instanceof Error ? err.message : String(err),
+              }),
+            );
+          });
+      }
     })
     .catch((err: unknown) => {
+      const message = err instanceof Error ? err.message : String(err);
       console.error(
-        `[session-start] Initial graph run failed for session=${sessionId}:`,
-        err instanceof Error ? err.message : err,
+        "[graph-run-error]",
+        JSON.stringify({ sessionId, label, error: message, failedAt: new Date().toISOString() }),
       );
+      if (chatId) {
+        getBot()
+          .api.sendMessage(
+            chatId,
+            [
+              `❌ Agent graph run failed.`,
+              `Session: ${sessionId}`,
+              `Error: ${message}`,
+            ].join("\n"),
+          )
+          .catch((notifyErr: unknown) => {
+            console.error(
+              "[graph-run-notify-error]",
+              JSON.stringify({
+                sessionId,
+                chatId,
+                error: notifyErr instanceof Error ? notifyErr.message : String(notifyErr),
+              }),
+            );
+          });
+      }
     });
 }
 
 /**
  * Creates one persisted session and immediately kicks off its first AI run.
+ * chatId is optional; when supplied the user receives a Telegram message on completion.
  */
-async function createSession(): Promise<SessionSnapshot> {
+async function createSession(chatId?: number): Promise<SessionSnapshot> {
+  console.log("[session-create]", JSON.stringify({ chatId: chatId ?? null, at: new Date().toISOString() }));
+
   const session = await createNewTask({
     name: `Autonomous session ${new Date().toISOString()}`,
     metadata: { targetToken: null },
   });
 
-  startInitialGraphRun(session.id);
+  console.log("[session-created]", JSON.stringify({ sessionId: session.id, name: session.name }));
+
+  startGraphRun(session.id, chatId, "Initial");
   return { id: session.id, name: session.name, createdAt: session.createdAt };
 }
 
@@ -217,139 +292,6 @@ async function getSessionsText(): Promise<string> {
   ].join("\n");
 }
 
-async function getSessionResumeTargets(): Promise<SessionResumeTarget[]> {
-  const sessions = await prisma.session.findMany({
-    orderBy: { createdAt: "desc" },
-    take: 5,
-    select: {
-      id: true,
-      name: true,
-      createdAt: true,
-      stages: {
-        orderBy: { sequence: "desc" },
-        take: 1,
-        select: {
-          sequence: true,
-          summary: true,
-          sessionAction: true,
-          stageActionCompleted: true,
-        },
-      },
-    },
-  });
-
-  return sessions.map((session) => ({
-    id: session.id,
-    name: session.name,
-    createdAt: session.createdAt,
-    latestStage: session.stages[0] ?? null,
-  }));
-}
-
-function buildSessionResumeKeyboard(sessions: SessionResumeTarget[]): InlineKeyboard {
-  const keyboard = new InlineKeyboard();
-
-  sessions.forEach((session, index) => {
-    keyboard.text(`Resume #${index + 1}`, `resume_session:${session.id}`).row();
-  });
-
-  return keyboard;
-}
-
-function buildSessionSelectionText(sessions: SessionResumeTarget[]): string {
-  const lines = [
-    "Choose a session to resume.",
-    "Tap a button below to resume that exact session context.",
-    "Note: resume is currently mocked and does not trigger live trading yet.",
-    "",
-    "Recent sessions:",
-  ];
-
-  for (const [index, session] of sessions.entries()) {
-    lines.push(`${index + 1}) ${session.name}`);
-    lines.push(`- ID: ${session.id}`);
-    lines.push(`- Created: ${session.createdAt.toISOString()}`);
-
-    if (!session.latestStage) {
-      lines.push("- Latest stage: none");
-      continue;
-    }
-
-    lines.push(
-      `- Latest stage: #${session.latestStage.sequence} (${session.latestStage.sessionAction})`,
-    );
-    lines.push(`- Stage completed: ${session.latestStage.stageActionCompleted ? "yes" : "no"}`);
-    lines.push(`- Summary: ${session.latestStage.summary}`);
-  }
-
-  return lines.join("\n");
-}
-
-/**
- * Mocked resume path for inline session selection.
- * Real resume execution will be implemented later.
- */
-async function mockResumeSession(sessionId: string, requestedByUserId: number | null): Promise<string> {
-  const session = await prisma.session.findUnique({
-    where: { id: sessionId },
-    select: {
-      id: true,
-      name: true,
-      createdAt: true,
-      stages: {
-        orderBy: { sequence: "desc" },
-        take: 1,
-        select: {
-          sequence: true,
-          sessionAction: true,
-          stageActionCompleted: true,
-        },
-      },
-    },
-  });
-
-  if (!session) {
-    return `Could not resume session ${sessionId}: session not found.`;
-  }
-
-  const latestStage = session.stages[0];
-
-  console.log(
-    "[telegram-resume-mock]",
-    JSON.stringify({
-      sessionId: session.id,
-      requestedByUserId,
-      requestedAt: new Date().toISOString(),
-    }),
-  );
-
-  return [
-    "Resume request received.",
-    "This is a mocked resume flow for now (no live execution yet).",
-    `Session ID: ${session.id}`,
-    `Session Name: ${session.name}`,
-    `Created: ${session.createdAt.toISOString()}`,
-    latestStage
-      ? `Latest stage: #${latestStage.sequence} (${latestStage.sessionAction}), completed=${latestStage.stageActionCompleted ? "yes" : "no"}`
-      : "Latest stage: none",
-    "Implementation note: replace mockResumeSession(...) with real resume logic later.",
-  ].join("\n");
-}
-
-async function sendSessionsSelection(ctx: GrammyContext): Promise<void> {
-  const sessions = await getSessionResumeTargets();
-  if (sessions.length === 0) {
-    await replyWithLog(
-      ctx,
-      "No saved sessions were found yet.\nUse /start to create your first session.",
-    );
-    return;
-  }
-
-  const keyboard = buildSessionResumeKeyboard(sessions);
-  const detailedText = buildSessionSelectionText(sessions);
-  await replyWithLog(ctx, detailedText, { reply_markup: keyboard });
-}
 
 async function sendCommandDirectory(ctx: GrammyContext): Promise<void> {
   const keyboard = buildCommandKeyboard();
@@ -357,15 +299,70 @@ async function sendCommandDirectory(ctx: GrammyContext): Promise<void> {
 }
 
 async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName): Promise<void> {
+  const chatId = ctx.chat?.id ?? undefined;
+
+  console.log(
+    "[telegram-command]",
+    JSON.stringify({
+      command,
+      updateId: ctx.update.update_id,
+      chatId: chatId ?? null,
+      userId: ctx.from?.id ?? null,
+      username: ctx.from?.username ?? null,
+    }),
+  );
+
   switch (command) {
     case "start": {
-      const session = await createSession();
+      const session = await createSession(chatId);
       await replyWithLog(
         ctx,
         [
-          "Started a new trading session.",
+          "🚀 Started a new trading session.",
           `Session ID: ${session.id}`,
           `Name: ${session.name}`,
+          "",
+          "The agent graph is now running in the background.",
+          "You will receive a message here when it completes.",
+          "Use /current to check the latest stage at any time.",
+        ].join("\n"),
+      );
+      return;
+    }
+    case "run": {
+      const latestSession = await prisma.session.findFirst({
+        orderBy: { createdAt: "desc" },
+        select: { id: true, name: true },
+      });
+
+      if (!latestSession) {
+        await replyWithLog(
+          ctx,
+          "No sessions found. Use /start to create your first session.",
+        );
+        return;
+      }
+
+      console.log(
+        "[telegram-run]",
+        JSON.stringify({
+          sessionId: latestSession.id,
+          chatId: chatId ?? null,
+          triggeredAt: new Date().toISOString(),
+        }),
+      );
+
+      startGraphRun(latestSession.id, chatId, "Manual");
+      await replyWithLog(
+        ctx,
+        [
+          "▶️ Agent graph run triggered.",
+          `Session ID: ${latestSession.id}`,
+          `Session Name: ${latestSession.name}`,
+          "",
+          "The agent is running in the background.",
+          "You will receive a message here when it completes.",
+          "Use /current to check progress.",
         ].join("\n"),
       );
       return;
@@ -374,7 +371,7 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
       await replyWithLog(ctx, await getLatestSessionText());
       return;
     case "sessions":
-      await sendSessionsSelection(ctx);
+      await replyWithLog(ctx, await getSessionsText());
       return;
     case "config":
       await replyWithLog(ctx, `Current config:\n${buildGuardrailsDescription()}`);
@@ -401,6 +398,8 @@ function getBot(): Bot {
   }
 
   const bot = new Bot(getTelegramToken());
+
+  console.log("[telegram-bot-init]", JSON.stringify({ initializedAt: new Date().toISOString() }));
 
   // Prevent full ctx dumps on unhandled errors; log only debug-relevant fields.
   bot.catch((err) => {
@@ -443,24 +442,13 @@ function getBot(): Bot {
   });
 
   bot.command("start", async (ctx) => dispatchCommand(ctx, "start"));
+  bot.command("run", async (ctx) => dispatchCommand(ctx, "run"));
   bot.command("current", async (ctx) => dispatchCommand(ctx, "current"));
   bot.command("sessions", async (ctx) => dispatchCommand(ctx, "sessions"));
   bot.command("config", async (ctx) => dispatchCommand(ctx, "config"));
   bot.command("settings", async (ctx) => dispatchCommand(ctx, "settings"));
   bot.command("exit", async (ctx) => dispatchCommand(ctx, "exit"));
   bot.command("help", async (ctx) => dispatchCommand(ctx, "help"));
-
-  bot.callbackQuery(/^resume_session:(.+)$/, async (ctx) => {
-    const sessionId = Array.isArray(ctx.match) ? ctx.match[1] : null;
-    if (!sessionId) {
-      await ctx.answerCallbackQuery({ text: "Invalid session selection." });
-      return;
-    }
-
-    await ctx.answerCallbackQuery({ text: "Resume request received." });
-    const response = await mockResumeSession(sessionId, ctx.from?.id ?? null);
-    await replyWithLog(ctx, response);
-  });
 
   bot.callbackQuery(/^run_command:(.+)$/, async (ctx) => {
     const command = Array.isArray(ctx.match) ? ctx.match[1] : null;
@@ -502,7 +490,15 @@ export async function handleTelegramWebhook(c: Context) {
   //   return c.json({ error: "Unauthorized." }, 401);
   // }
 
-  console.log("context recieved")
+  console.log(
+    "[telegram-webhook]",
+    JSON.stringify({
+      method: c.req.method,
+      path: c.req.path,
+      hasSecret: Boolean(c.req.header("X-Telegram-Bot-Api-Secret-Token")),
+      receivedAt: new Date().toISOString(),
+    }),
+  );
   const callback = webhookCallback(getBot(), "std/http");
   return callback(c.req.raw);
 }
