@@ -71,12 +71,7 @@ import { buildGuardrailsDescription } from "../lib/config";
  *    (or use the session metadata JSON) to let users toggle dryRun,
  *    maxOrderSize, etc. at runtime without redeploying.
  *
- * C. WEBHOOK SECRET ENFORCEMENT
- *    The verifyTelegramSecret() helper is implemented but the check inside
- *    handleTelegramWebhook() is commented out.  Uncomment that block once you
- *    have set TELEGRAM_WEBHOOK_SECRET in both .env and the setWebhook call.
- *
- * D. SESSION SELECTION FOR /run
+ * C. SESSION SELECTION FOR /run
  *    /run always targets the most-recent session.  To let the user pick a
  *    session, make /sessions return an InlineKeyboard where each row carries a
  *    callback_data of "run_session:<id>", and add a matching callbackQuery
@@ -380,14 +375,15 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
 
   switch (command) {
     case "ping": {
-      const latencyMs = Date.now() - (ctx.message?.date ? ctx.message.date * 1000 : Date.now());
+      const messageDate = ctx.message?.date;
+      const latencyMs = messageDate ? Date.now() - messageDate * 1000 : null;
       await replyWithLog(
         ctx,
         [
           "🏓 Pong!",
           `Bot is online and reachable.`,
           `Server time: ${new Date().toISOString()}`,
-          latencyMs > 0 ? `Approx. latency: ${latencyMs}ms` : "",
+          latencyMs !== null ? `Approx. latency: ${latencyMs}ms` : "",
         ]
           .filter(Boolean)
           .join("\n"),
@@ -586,7 +582,6 @@ function getBot(): Bot {
 }
 
 export async function handleTelegramWebhook(c: Context) {
-  const secretHeader = c.req.header("X-Telegram-Bot-Api-Secret-Token");
   const secretConfigured = Boolean(process.env.TELEGRAM_WEBHOOK_SECRET);
   const secretValid = verifyTelegramSecret(c);
 
@@ -601,7 +596,7 @@ export async function handleTelegramWebhook(c: Context) {
     }),
   );
 
-  if (!secretValid) {
+  if (secretConfigured && !secretValid) {
     console.warn("[telegram-webhook-unauthorized]", JSON.stringify({ receivedAt: new Date().toISOString() }));
     return c.json({ error: "Unauthorized." }, 401);
   }
