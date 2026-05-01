@@ -1,0 +1,51 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+// Get a free hosted Postgres database in seconds: `npx create-db`
+
+generator client {
+  provider = "prisma-client"
+  output   = "../src/generated/prisma"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+enum SessionAction {
+  START_TRADE
+  END_TRADE
+  WAIT
+  SKIP
+}
+
+model Session {
+  id        String         @id @default(uuid()) @db.Uuid
+  name      String
+  pages     Json?
+  metadata  Json?
+  createdAt DateTime       @default(now())
+  updatedAt DateTime       @updatedAt
+  stages    SessionStage[]
+}
+
+model SessionStage {
+  id            String         @id @default(uuid()) @db.Uuid
+  sessionId     String         @db.Uuid
+  session       Session        @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+  sequence      Int
+  summary       String
+  todo          String
+  sessionAction SessionAction
+  stageActionCompleted Boolean  @default(false)
+  nextWake      DateTime
+  prevStageId   String?        @db.Uuid
+  prevStage     SessionStage?  @relation("SessionStageChain", fields: [prevStageId], references: [id], onDelete: SetNull)
+  nextStages    SessionStage[] @relation("SessionStageChain")
+  createdAt     DateTime       @default(now())
+  updatedAt     DateTime       @updatedAt
+
+  @@unique([sessionId, sequence])
+  @@index([sessionId, createdAt])
+  @@index([sessionId, nextWake])
+}
