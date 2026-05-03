@@ -14,6 +14,19 @@ import { buildGuardrailsDescription } from "../lib/config";
  * 1. ENVIRONMENT VARIABLES — copy .env.example → .env and fill in every value.
  *    Bun auto-loads .env, so no dotenv import is needed.
  *
+ *    Required variables:
+ *      TELEGRAM_BOT_TOKEN      — from @BotFather on Telegram
+ *      DATABASE_URL            — PostgreSQL connection string (Prisma)
+ *      GEMINI_API_KEY          — from https://aistudio.google.com
+ *
+ *    Optional but recommended:
+ *      TELEGRAM_WEBHOOK_SECRET — any random string; add to setWebhook call
+ *      WAKE_API_TOKEN          — protects /wake endpoint
+ *      POLY_API_KEY / _SECRET / _PASSPHRASE / POLY_PRIVATE_KEY — live trading
+ *
+ *    Debugging:
+ *      DEBUG=true              — logs full Telegram update payloads to console
+ *
  * 2. DATABASE MIGRATIONS — run once before first use:
  *      bunx prisma migrate deploy        # production
  *      bunx prisma migrate dev           # development (also regenerates client)
@@ -28,21 +41,58 @@ import { buildGuardrailsDescription } from "../lib/config";
  *           -d '{"url":"https://<your-domain>/telegram/webhook",
  *                "secret_token":"<TELEGRAM_WEBHOOK_SECRET>"}'
  *
+ *    Verify the webhook is registered:
+ *      curl "https://api.telegram.org/bot<TOKEN>/getWebhookInfo"
+ *
  * 5. SYNC THE SLASH-COMMAND MENU — run once (or after every TELEGRAM_COMMANDS change):
  *      curl -X POST https://<your-domain>/telegram/commands/sync
+ *
+ * 6. TEST CONNECTIVITY — after starting the server, send /ping to your bot.
+ *    The bot should immediately reply with a pong message. If it does not,
+ *    check the server logs for [telegram-webhook] and [telegram-message] entries.
  *
  * ─── WHAT IS STILL MISSING ────────────────────────────────────────────────────
  *
  * A. USER AUTHENTICATION / ALLOWLIST
  *    Anyone who finds the bot can call every command.
- *    Add an allowlist check in dispatchCommand() using ctx.from?.id compared
- *    against a TELEGRAM_ALLOWED_USER_IDS env var (comma-separated user IDs).
+ *    To restrict access:
+ *      1. Add TELEGRAM_ALLOWED_USER_IDS=123456789,987654321 to your .env
+ *         (comma-separated Telegram user IDs — find yours via @userinfobot).
+ *      2. In dispatchCommand(), add a guard at the top:
+ *           const allowedIds = (process.env.TELEGRAM_ALLOWED_USER_IDS ?? "")
+ *             .split(",").map(s => s.trim()).filter(Boolean);
+ *           if (allowedIds.length > 0 && !allowedIds.includes(String(ctx.from?.id))) {
+ *             await replyWithLog(ctx, "⛔ You are not authorised to use this bot.");
+ *             return;
+ *           }
  *
  * B. /settings COMMAND
  *    Currently a stub.  Wire it up to a Prisma-backed user-preferences table
- *    (or use session metadata JSON) to let users toggle dryRun, maxOrderSize, etc.
+ *    (or use the session metadata JSON) to let users toggle dryRun,
+ *    maxOrderSize, etc. at runtime without redeploying.
+ *
+ * C. SESSION SELECTION FOR /run
+ *    /run always targets the most-recent session.  To let the user pick a
+ *    session, make /sessions return an InlineKeyboard where each row carries a
+ *    callback_data of "run_session:<id>", and add a matching callbackQuery
+ *    handler that calls startGraphRun(sessionId, chatId, "Manual").
+ *
+ * ─── HOW TO PUSH CHANGES ──────────────────────────────────────────────────────
+ *
+ *    git add src/telegram.ts          # (or `git add -A` for all changes)
+ *    git commit -m "feat: improve telegram bot"
+ *    git push origin <your-branch>
+ *
+ *    If you are deploying to a cloud service (Railway, Render, Fly.io, etc.)
+ *    the push will trigger a redeploy automatically.  After the new version is
+ *    live, re-run the commands/sync endpoint so the slash-command menu updates:
+ *      curl -X POST https://<your-domain>/telegram/commands/sync
  * ──────────────────────────────────────────────────────────────────────────────
  */
+
+/** Set DEBUG=true in .env to enable verbose update-payload logging. */
+const DEBUG = process.env.DEBUG === "true";
+
 type SessionSnapshot = {
   id: string;
   name: string;
@@ -50,11 +100,12 @@ type SessionSnapshot = {
 };
 
 const TELEGRAM_COMMANDS = [
-  { command: "config", description: "Set your trading preferences." },
+  { command: "ping", description: "Check bot connectivity." },
   { command: "sessions", description: "List recent trade sessions." },
   { command: "current", description: "Show latest session status." },
   { command: "start", description: "Start a new trading session." },
   { command: "run", description: "Run the agent graph on the latest session." },
+  { command: "config", description: "Show current trading guardrail config." },
   { command: "exit", description: "Exit current interaction." },
   { command: "settings", description: "Adjust your experience." },
   { command: "help", description: "Show all commands and quick actions." },
@@ -126,6 +177,12 @@ async function replyWithLog(ctx: GrammyContext, text: string, options?: ReplyOpt
     }),
   );
   await ctx.reply(text, options);
+}
+
+/** Emits the full raw Telegram update only when DEBUG=true. */
+function logDebugUpdate(ctx: GrammyContext): void {
+  if (!DEBUG) return;
+  console.log("[telegram-debug-update]", JSON.stringify(ctx.update, null, 2));
 }
 
 /**
@@ -266,7 +323,7 @@ async function getLatestSessionText(): Promise<string> {
 }
 
 /**
- * Returns a compact list of recent sessions for /sessions.
+ * Returns a compact list of recent sessions for /sessions, with stage counts.
  */
 async function getSessionsText(): Promise<string> {
   const sessions = await prisma.session.findMany({
@@ -276,19 +333,23 @@ async function getSessionsText(): Promise<string> {
       id: true,
       name: true,
       createdAt: true,
+      _count: { select: { stages: true } },
     },
   });
 
   if (sessions.length === 0) {
-    return "No sessions found.";
+    return "No sessions found. Use /start to create your first session.";
   }
 
   return [
-    "Recent sessions:",
+    `Recent sessions (${sessions.length}):`,
     ...sessions.map(
       (session, index) =>
-        `${index + 1}. ${session.id} - ${session.name} (${session.createdAt.toISOString()})`,
+        `${index + 1}. ${session.name}\n   ID: ${session.id}\n   Stages: ${session._count.stages}  Created: ${session.createdAt.toISOString()}`,
     ),
+    "",
+    "Use /current to see the latest session in detail.",
+    "Use /run to re-run the agent on the latest session.",
   ].join("\n");
 }
 
@@ -313,6 +374,22 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
   );
 
   switch (command) {
+    case "ping": {
+      const messageDate = ctx.message?.date;
+      const latencyMs = messageDate ? Date.now() - messageDate * 1000 : null;
+      await replyWithLog(
+        ctx,
+        [
+          "🏓 Pong!",
+          `Bot is online and reachable.`,
+          `Server time: ${new Date().toISOString()}`,
+          latencyMs !== null ? `Approx. latency: ${latencyMs}ms` : "",
+        ]
+          .filter(Boolean)
+          .join("\n"),
+      );
+      return;
+    }
     case "start": {
       const session = await createSession(chatId);
       await replyWithLog(
@@ -434,13 +511,16 @@ function getBot(): Bot {
         messageId: message.message_id,
         chatId: message.chat.id,
         userId: message.from?.id ?? null,
+        username: message.from?.username ?? null,
         text: body,
       }),
     );
 
+    logDebugUpdate(ctx);
     await next();
   });
 
+  bot.command("ping", async (ctx) => dispatchCommand(ctx, "ping"));
   bot.command("start", async (ctx) => dispatchCommand(ctx, "start"));
   bot.command("run", async (ctx) => dispatchCommand(ctx, "run"));
   bot.command("current", async (ctx) => dispatchCommand(ctx, "current"));
@@ -452,6 +532,22 @@ function getBot(): Bot {
 
   bot.callbackQuery(/^run_command:(.+)$/, async (ctx) => {
     const command = Array.isArray(ctx.match) ? ctx.match[1] : null;
+
+    console.log(
+      "[telegram-callback]",
+      JSON.stringify({
+        updateId: ctx.update.update_id,
+        chatId: ctx.chat?.id ?? null,
+        userId: ctx.from?.id ?? null,
+        data: ctx.callbackQuery.data,
+        resolvedCommand: command ?? null,
+      }),
+    );
+
+    if (DEBUG) {
+      console.log("[telegram-debug-update]", JSON.stringify(ctx.update, null, 2));
+    }
+
     if (!command || !SUPPORTED_COMMANDS.has(command)) {
       await ctx.answerCallbackQuery({ text: "Unknown command selection." });
       return;
@@ -486,19 +582,25 @@ function getBot(): Bot {
 }
 
 export async function handleTelegramWebhook(c: Context) {
-  // if (!verifyTelegramSecret(c)) {
-  //   return c.json({ error: "Unauthorized." }, 401);
-  // }
+  const secretConfigured = Boolean(process.env.TELEGRAM_WEBHOOK_SECRET);
+  const secretValid = verifyTelegramSecret(c);
 
   console.log(
     "[telegram-webhook]",
     JSON.stringify({
       method: c.req.method,
       path: c.req.path,
-      hasSecret: Boolean(c.req.header("X-Telegram-Bot-Api-Secret-Token")),
+      secretConfigured,
+      secretValid,
       receivedAt: new Date().toISOString(),
     }),
   );
+
+  if (secretConfigured && !secretValid) {
+    console.warn("[telegram-webhook-unauthorized]", JSON.stringify({ receivedAt: new Date().toISOString() }));
+    return c.json({ error: "Unauthorized." }, 401);
+  }
+
   const callback = webhookCallback(getBot(), "std/http");
   return callback(c.req.raw);
 }
