@@ -446,6 +446,10 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
     }
     case "start": {
       if (ctx.from?.id) {
+        // Apply this user's stored preferences to the shared botConfig before
+        // starting the session.  This bot is designed for a single operator, so
+        // concurrent multi-user calls are not expected; preferences in the DB
+        // remain authoritative across restarts.
         const prefs = await getUserPreferences(String(ctx.from.id));
         applyUserPreferences(prefs);
       }
@@ -466,6 +470,7 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
     }
     case "run": {
       if (ctx.from?.id) {
+        // Same single-operator assumption as in "start" above.
         const prefs = await getUserPreferences(String(ctx.from.id));
         applyUserPreferences(prefs);
       }
