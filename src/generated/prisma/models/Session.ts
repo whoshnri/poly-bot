@@ -327,14 +327,6 @@ export type SessionScalarRelationFilter = {
   isNot?: Prisma.SessionWhereInput
 }
 
-export type StringFieldUpdateOperationsInput = {
-  set?: string
-}
-
-export type DateTimeFieldUpdateOperationsInput = {
-  set?: Date | string
-}
-
 export type SessionCreateNestedOneWithoutStagesInput = {
   create?: Prisma.XOR<Prisma.SessionCreateWithoutStagesInput, Prisma.SessionUncheckedCreateWithoutStagesInput>
   connectOrCreate?: Prisma.SessionCreateOrConnectWithoutStagesInput

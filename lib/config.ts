@@ -1,4 +1,5 @@
 import configJson from "../ai/config.json" with { type: "json" };
+import type { UserPreferences } from "../types/db";
 
 export type TradeGuardrails = {
   maxOrderSizeUsdc: number;
@@ -38,6 +39,20 @@ function loadConfig(): BotConfig {
 }
 
 export const botConfig: BotConfig = loadConfig();
+
+/**
+ * Applies a partial set of user preferences to the live bot config at runtime.
+ * Call this after loading or updating user preferences so the AI graph uses
+ * the correct values without needing a process restart.
+ */
+export function applyUserPreferences(prefs: Partial<UserPreferences>): void {
+  if (prefs.dryRun !== undefined) {
+    botConfig.tradeGuardrails.dryRun = prefs.dryRun;
+  }
+  if (prefs.maxOrderSizeUsdc !== undefined) {
+    botConfig.tradeGuardrails.maxOrderSizeUsdc = prefs.maxOrderSizeUsdc;
+  }
+}
 
 /**
  * Formats guardrail constraints as a human-readable string for prompt inclusion.

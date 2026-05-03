@@ -51,6 +51,7 @@ export const AnyNull = runtime.AnyNull
 
 
 export const ModelName = {
+  UserConfig: 'UserConfig',
   Session: 'Session',
   SessionStage: 'SessionStage'
 } as const
@@ -69,6 +70,17 @@ export const TransactionIsolationLevel = runtime.makeStrictEnum({
 } as const)
 
 export type TransactionIsolationLevel = (typeof TransactionIsolationLevel)[keyof typeof TransactionIsolationLevel]
+
+
+export const UserConfigScalarFieldEnum = {
+  id: 'id',
+  telegramId: 'telegramId',
+  preferences: 'preferences',
+  createdAt: 'createdAt',
+  updatedAt: 'updatedAt'
+} as const
+
+export type UserConfigScalarFieldEnum = (typeof UserConfigScalarFieldEnum)[keyof typeof UserConfigScalarFieldEnum]
 
 
 export const SessionScalarFieldEnum = {
@@ -106,6 +118,13 @@ export const SortOrder = {
 } as const
 
 export type SortOrder = (typeof SortOrder)[keyof typeof SortOrder]
+
+
+export const JsonNullValueInput = {
+  JsonNull: JsonNull
+} as const
+
+export type JsonNullValueInput = (typeof JsonNullValueInput)[keyof typeof JsonNullValueInput]
 
 
 export const NullableJsonNullValueInput = {
