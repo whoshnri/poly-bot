@@ -1,5 +1,10 @@
 import type { Prisma, SessionAction } from "../src/generated/prisma/client";
 
+export type UserPreferences = {
+  dryRun?: boolean;
+  maxOrderSizeUsdc?: number;
+};
+
 export type CreateNewTaskInput = {
   name: string;
   pages?: Prisma.InputJsonValue;

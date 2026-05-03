@@ -3,8 +3,9 @@ import { Bot, InlineKeyboard, webhookCallback } from "grammy";
 import type { Context as GrammyContext } from "grammy";
 import { compileTradingGraph } from "../ai";
 import { createNewTask } from "../actions/db";
+import { getUserPreferences, updateUserPreferences } from "../actions/userConfig";
 import prisma from "../lib/prisma";
-import { buildGuardrailsDescription } from "../lib/config";
+import { applyUserPreferences, buildGuardrailsDescription } from "../lib/config";
 
 /**
  * Telegram webhook module (grammY + Hono).
@@ -67,9 +68,10 @@ import { buildGuardrailsDescription } from "../lib/config";
  *           }
  *
  * B. /settings COMMAND
- *    Currently a stub.  Wire it up to a Prisma-backed user-preferences table
- *    (or use the session metadata JSON) to let users toggle dryRun,
- *    maxOrderSize, etc. at runtime without redeploying.
+ *    Users can toggle dryRun mode and adjust maxOrderSizeUsdc via an
+ *    InlineKeyboard.  Preferences are persisted in the UserConfig table and
+ *    applied to the live botConfig so they take effect on the next session run
+ *    without a process restart.
  *
  * C. SESSION SELECTION FOR /run
  *    /run always targets the most-recent session.  To let the user pick a
@@ -359,6 +361,58 @@ async function sendCommandDirectory(ctx: GrammyContext): Promise<void> {
   await replyWithLog(ctx, buildDetailedCommandText(), { reply_markup: keyboard });
 }
 
+const SETTINGS_MAX_ORDER_OPTIONS = [25, 50, 100, 200] as const;
+
+/**
+ * Builds the settings menu text and InlineKeyboard for a given Telegram user.
+ */
+async function buildSettingsMenu(
+  userId: string,
+): Promise<{ text: string; keyboard: InlineKeyboard }> {
+  const prefs = await getUserPreferences(userId);
+  const dryRunLabel = prefs.dryRun ? "✅ ON  (no real orders)" : "❌ OFF  (live trading)";
+
+  const text = [
+    "⚙️ Bot Settings",
+    "",
+    `Dry-run mode: ${dryRunLabel}`,
+    `Max order size: $${prefs.maxOrderSizeUsdc} USDC`,
+    "",
+    "Changes take effect immediately for the next session run.",
+  ].join("\n");
+
+  const keyboard = new InlineKeyboard()
+    .text(
+      `Dry run: ${prefs.dryRun ? "✅ ON → turn OFF" : "❌ OFF → turn ON"}`,
+      "settings:toggle_dry_run",
+    )
+    .row()
+    .text("Max order size:", "settings:noop");
+
+  for (const amount of SETTINGS_MAX_ORDER_OPTIONS) {
+    keyboard.text(
+      prefs.maxOrderSizeUsdc === amount ? `✅ $${amount}` : `$${amount}`,
+      `settings:max_order:${amount}`,
+    );
+  }
+
+  return { text, keyboard };
+}
+
+/**
+ * Sends or re-renders the settings menu for the calling user.
+ */
+async function sendSettingsMenu(ctx: GrammyContext): Promise<void> {
+  const userId = ctx.from?.id;
+  if (!userId) {
+    await replyWithLog(ctx, "Cannot read your Telegram user ID.");
+    return;
+  }
+
+  const { text, keyboard } = await buildSettingsMenu(String(userId));
+  await replyWithLog(ctx, text, { reply_markup: keyboard });
+}
+
 async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName): Promise<void> {
   const chatId = ctx.chat?.id ?? undefined;
 
@@ -391,6 +445,10 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
       return;
     }
     case "start": {
+      if (ctx.from?.id) {
+        const prefs = await getUserPreferences(String(ctx.from.id));
+        applyUserPreferences(prefs);
+      }
       const session = await createSession(chatId);
       await replyWithLog(
         ctx,
@@ -407,6 +465,10 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
       return;
     }
     case "run": {
+      if (ctx.from?.id) {
+        const prefs = await getUserPreferences(String(ctx.from.id));
+        applyUserPreferences(prefs);
+      }
       const latestSession = await prisma.session.findFirst({
         orderBy: { createdAt: "desc" },
         select: { id: true, name: true },
@@ -454,7 +516,7 @@ async function dispatchCommand(ctx: GrammyContext, command: TelegramCommandName)
       await replyWithLog(ctx, `Current config:\n${buildGuardrailsDescription()}`);
       return;
     case "settings":
-      await replyWithLog(ctx, "Settings command received. Settings flow is not implemented yet.");
+      await sendSettingsMenu(ctx);
       return;
     case "exit":
       await replyWithLog(ctx, "Exited current interaction. Use /start when you are ready to continue.");
@@ -555,6 +617,50 @@ function getBot(): Bot {
 
     await ctx.answerCallbackQuery({ text: `Running /${command}` });
     await dispatchCommand(ctx, command as TelegramCommandName);
+  });
+
+  bot.callbackQuery("settings:noop", async (ctx) => {
+    await ctx.answerCallbackQuery();
+  });
+
+  bot.callbackQuery("settings:toggle_dry_run", async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) {
+      await ctx.answerCallbackQuery({ text: "Cannot read your user ID." });
+      return;
+    }
+
+    const current = await getUserPreferences(String(userId));
+    const updated = await updateUserPreferences(String(userId), { dryRun: !current.dryRun });
+    applyUserPreferences(updated);
+
+    const { text, keyboard } = await buildSettingsMenu(String(userId));
+    await ctx.answerCallbackQuery({
+      text: `Dry run is now ${updated.dryRun ? "ON" : "OFF"}.`,
+    });
+    await ctx.editMessageText(text, { reply_markup: keyboard });
+  });
+
+  bot.callbackQuery(/^settings:max_order:(\d+)$/, async (ctx) => {
+    const userId = ctx.from?.id;
+    if (!userId) {
+      await ctx.answerCallbackQuery({ text: "Cannot read your user ID." });
+      return;
+    }
+
+    const amountStr = Array.isArray(ctx.match) ? ctx.match[1] : null;
+    const amount = amountStr ? Number(amountStr) : NaN;
+    if (!Number.isFinite(amount) || amount <= 0) {
+      await ctx.answerCallbackQuery({ text: "Invalid amount." });
+      return;
+    }
+
+    const updated = await updateUserPreferences(String(userId), { maxOrderSizeUsdc: amount });
+    applyUserPreferences(updated);
+
+    const { text, keyboard } = await buildSettingsMenu(String(userId));
+    await ctx.answerCallbackQuery({ text: `Max order size set to $${amount} USDC.` });
+    await ctx.editMessageText(text, { reply_markup: keyboard });
   });
 
   // If user sends an unknown slash command, show available command help.
